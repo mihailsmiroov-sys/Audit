@@ -579,7 +579,7 @@
   <div class="confirm-sub">Добавить в очередь на распознавание</div>
   <div class="confirm-btns">
     <button class="btn btn-secondary" onclick="cancelPhoto()">Переснять</button>
-    <button class="btn btn-primary" onclick="savePhoto()">Сохранить</button>
+    <button class="btn btn-primary" onclick="confirmSavePhoto()">Сохранить</button>
   </div>
 </div>
 
@@ -676,7 +676,7 @@ async function saveSession() {
   });
 }
 
-async function savePhoto(id, blob, dataUrl) {
+async function savePhotoToDB(id, blob, dataUrl) {
   if (!db) return;
   const tx = db.transaction(['photos'], 'readwrite');
   tx.objectStore('photos').put({ id, blob, dataUrl });
@@ -846,7 +846,7 @@ function cancelPhoto() {
   document.getElementById('confirm-overlay').classList.remove('active');
 }
 
-async function savePhoto() {
+async function confirmSavePhoto() {
   document.getElementById('confirm-overlay').classList.remove('active');
 
   if (state.queue.length >= state.MAX_QUEUE) {
@@ -863,7 +863,7 @@ async function savePhoto() {
   };
 
   state.queue.push(item);
-  await savePhoto(id, item.blob, item.dataUrl);
+  await savePhotoToDB(id, item.blob, item.dataUrl);
 
   state.pendingPhotoBlob = null;
   state.pendingPhotoDataUrl = null;
