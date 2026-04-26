@@ -509,11 +509,12 @@
     </div>
 
     <div class="form-group">
-      <label class="form-label">Модель Gemini</label>
+      <label class="form-label">Модель</label>
       <select class="form-input" id="model-select">
-        <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash (рекомендуется)</option>
-        <option value="google/gemini-2.5-flash-preview">Gemini 2.5 Flash</option>
-        <option value="google/gemini-2.5-pro-preview">Gemini 2.5 Pro</option>
+        <option value="google/gemini-2.5-flash-preview:thinking">Gemini 2.5 Flash (рекомендуется)</option>
+        <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
+        <option value="google/gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro</option>
+        <option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku</option>
       </select>
     </div>
 
@@ -932,12 +933,19 @@ async function recognizePhoto(item) {
       })
     });
 
-    if (!response.ok) throw new Error(`API error: ${response.status}`);
+    if (!response.ok) {
+      let errBody = '';
+      try { const errJson = await response.json(); errBody = errJson.error?.message || JSON.stringify(errJson); }
+      catch { errBody = await response.text().catch(() => ''); }
+      throw new Error(`HTTP ${response.status}: ${errBody}`);
+    }
 
     const data = await response.json();
     const text = data.choices?.[0]?.message?.content || '{"serials":[]}';
     const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    let parsed;
+    try { parsed = JSON.parse(clean); }
+    catch { throw new Error('Модель вернула неверный JSON: ' + clean.slice(0, 100)); }
     const serials = (parsed.serials || []).map(s => String(s).trim().toUpperCase());
 
     item.status = 'done';
@@ -946,7 +954,8 @@ async function recognizePhoto(item) {
   } catch (err) {
     console.error('Recognition error:', err);
     item.status = 'error';
-    processResult(item, []);
+    item.errorMsg = err.message;
+    processResult(item, [], err.message);
   }
 
   updateQueueBar();
@@ -972,7 +981,7 @@ function findInExcel(serials) {
   return null;
 }
 
-function processResult(item, serials) {
+function processResult(item, serials, errorMsg) {
   const match = findInExcel(serials);
   const resultId = item.id;
 
@@ -1006,6 +1015,7 @@ function processResult(item, serials) {
       matchedSerial: null,
       rowIndex: -1,
       status: 'error',
+      errorMsg: errorMsg || '',
       usage: '',
       photoDataUrl: item.dataUrl,
     };
@@ -1047,6 +1057,7 @@ function renderCard(result) {
       <div class="card-info">
         <div class="card-serial">${result.matchedSerial || (result.serials[0] || '—')}</div>
         <div class="card-name">${equipName || (result.status === 'found' ? 'Оборудование найдено' : result.status === 'notfound' ? 'Не найдено в таблице' : 'Ошибка распознавания')}</div>
+        ${result.status === 'error' && result.errorMsg ? `<div style="font-size:11px;color:var(--red);margin-top:4px;word-break:break-all;">${result.errorMsg}</div>` : ''}
       </div>
       <span class="card-badge ${badgeClass}">${badgeText}</span>
     </div>
