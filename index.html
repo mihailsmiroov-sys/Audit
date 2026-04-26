@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0f1117">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <style>
   :root {
     --bg: #0f1117;
@@ -738,30 +738,46 @@ async function clearSession() {
 // ============================================================
 // SETUP
 // ============================================================
-let excelWorkbook = null;
+let excelFileBuffer = null;
 
 function handleExcelFile(input) {
   const file = input.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = e => {
+  reader.onload = async e => {
     try {
-      const wb = XLSX.read(e.target.result, { type: 'array' });
-      excelWorkbook = wb;
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-      if (data.length < 2) { alert('Excel пустой или нет данных'); return; }
+      excelFileBuffer = e.target.result.slice(0);
 
-      state.excelHeaders = data[0];
-      state.excelData = data.slice(1).map(row => {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(e.target.result);
+      const ws = wb.worksheets[0];
+
+      // Read headers from row 1
+      const headerRow = ws.getRow(1);
+      state.excelHeaders = [];
+      headerRow.eachCell({ includeEmpty: true }, (cell, colNum) => {
+        state.excelHeaders[colNum - 1] = cell.value != null ? String(cell.value) : '';
+      });
+
+      // Read data rows
+      state.excelData = [];
+      ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
+        if (rowNum === 1) return;
         const obj = {};
-        state.excelHeaders.forEach((h, i) => { obj[i] = row[i] || ''; });
+        state.excelHeaders.forEach((h, i) => {
+          const cell = row.getCell(i + 1);
+          let val = cell.value;
+          if (val && typeof val === 'object' && val.result !== undefined) val = val.result;
+          if (val && typeof val === 'object' && val.text !== undefined) val = val.text;
+          obj[i] = val != null ? String(val) : '';
+        });
         obj['_auditStatus'] = 'Не проверялось';
         obj['_usage'] = '';
         obj['_room'] = '';
-        obj['_notInTable'] = '';
-        return obj;
+        state.excelData.push(obj);
       });
+
+      if (state.excelData.length === 0) { alert('Excel пустой или нет данных'); return; }
 
       // Find serial number column
       const serialKeywords = ['серийный', 'serial', 'с/н', 's/n', 'серійний'];
@@ -1257,85 +1273,91 @@ function newRoom() {
 // ============================================================
 // EXCEL EXPORT
 // ============================================================
-function downloadExcel() {
-  if (!excelWorkbook) {
+async function downloadExcel() {
+  if (!excelFileBuffer) {
     alert('Excel файл не загружен. Пожалуйста, загрузите файл снова.');
     return;
   }
 
-  const sheetName = excelWorkbook.SheetNames[0];
-  const ws = excelWorkbook.Sheets[sheetName];
-  const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  try {
+    // Load original file to preserve all formatting
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(excelFileBuffer);
+    const ws = wb.worksheets[0];
 
-  const headers = data[0];
-
-  // Detect columns by header name (exact match priority, then partial)
-  function findCol(keywords) {
-    for (const kw of keywords) {
-      const idx = headers.findIndex(h => String(h).toLowerCase() === kw.toLowerCase());
-      if (idx >= 0) return idx;
-    }
-    for (const kw of keywords) {
-      const idx = headers.findIndex(h => String(h).toLowerCase().includes(kw.toLowerCase()));
-      if (idx >= 0) return idx;
-    }
-    return -1;
-  }
-
-  const auditIdx    = findCol(['Аудит', 'аудит']);
-  const nameIdx     = findCol(['Название', 'название', 'name']);
-  const usageIdx    = findCol(['Статус использования', 'статус использ', 'использован']);
-  const roomIdx     = findCol(['Расположение', 'кабинет', 'расположение']);
-  const notInTblIdx = findCol(['Нет в таблице', 'нет в таблице']);
-
-  // Update existing rows
-  state.excelData.forEach((rowObj, i) => {
-    const row = data[i + 1]; // i+1 because row 0 is header
-    if (!row) return;
-    if (auditIdx >= 0) row[auditIdx] = rowObj['_auditStatus'] || 'Не проверялось';
-    if (roomIdx >= 0 && rowObj['_room']) row[roomIdx] = rowObj['_room'];
-    if (usageIdx >= 0 && rowObj['_usage']) row[usageIdx] = rowObj['_usage'];
-  });
-
-  // Append "not in table" serials as new rows at the bottom of Название column
-  const confirmedNotInTable = state.results.filter(r => r.status === 'notfound_confirmed' && r['_notInTable']);
-  if (confirmedNotInTable.length > 0 && nameIdx >= 0) {
-    confirmedNotInTable.forEach(r => {
-      const newRow = new Array(headers.length).fill('');
-      newRow[nameIdx] = r['_notInTable'];
-      if (notInTblIdx >= 0) newRow[notInTblIdx] = r['_notInTable'];
-      data.push(newRow);
+    // Read headers
+    const headerRow = ws.getRow(1);
+    const headers = [];
+    headerRow.eachCell({ includeEmpty: true }, (cell, colNum) => {
+      headers[colNum - 1] = String(cell.value || '').trim();
     });
-  }
 
-  // Build new worksheet
-  const newWs = XLSX.utils.aoa_to_sheet(data);
-
-  // Apply cell colors for "Статус использования" column
-  if (usageIdx >= 0) {
-    for (let i = 1; i < data.length; i++) {
-      const val = String(data[i][usageIdx] || '').trim();
-      if (!val) continue;
-      const cellAddr = XLSX.utils.encode_cell({ r: i, c: usageIdx });
-      if (!newWs[cellAddr]) newWs[cellAddr] = { t: 's', v: val };
-      const isUsed = val.toLowerCase().includes('использу') && !val.toLowerCase().includes('не использу');
-      newWs[cellAddr].s = {
-        fill: {
-          patternType: 'solid',
-          fgColor: { rgb: isUsed ? '22c55e' : 'ef4444' },
-        },
-        font: { color: { rgb: 'FFFFFF' }, bold: true },
-        alignment: { horizontal: 'center', vertical: 'center' },
-      };
+    function findCol(keywords) {
+      for (const kw of keywords) {
+        const idx = headers.findIndex(h => h.toLowerCase() === kw.toLowerCase());
+        if (idx >= 0) return idx + 1; // ExcelJS is 1-based
+      }
+      for (const kw of keywords) {
+        const idx = headers.findIndex(h => h.toLowerCase().includes(kw.toLowerCase()));
+        if (idx >= 0) return idx + 1;
+      }
+      return -1;
     }
+
+    const auditCol  = findCol(['Аудит']);
+    const nameCol   = findCol(['Название']);
+    const usageCol  = findCol(['Статус использования', 'статус использ']);
+    const roomCol   = findCol(['Расположение']);
+
+    // Update existing rows (data rows start at row 2)
+    state.excelData.forEach((rowObj, i) => {
+      const excelRowNum = i + 2;
+      const row = ws.getRow(excelRowNum);
+
+      if (auditCol > 0) row.getCell(auditCol).value = rowObj['_auditStatus'] || 'Не проверялось';
+      if (roomCol > 0 && rowObj['_room']) row.getCell(roomCol).value = rowObj['_room'];
+
+      if (usageCol > 0 && rowObj['_usage']) {
+        const cell = row.getCell(usageCol);
+        cell.value = rowObj['_usage'];
+        const isUsed = rowObj['_usage'] === 'Используется';
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: isUsed ? 'FF22c55e' : 'FFef4444' },
+        };
+        cell.font = { color: { argb: 'FFFFFFFF' }, bold: true };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      }
+
+      row.commit();
+    });
+
+    // Add new rows for "not in table" confirmed items
+    const confirmedNotInTable = state.results.filter(r => r.status === 'notfound_confirmed' && r['_notInTable']);
+    confirmedNotInTable.forEach(r => {
+      const newRow = ws.addRow([]);
+      if (auditCol > 0) newRow.getCell(auditCol).value = 'Нет в таблице';
+      if (nameCol > 0)  newRow.getCell(nameCol).value  = r['_notInTable'];
+      if (roomCol > 0)  newRow.getCell(roomCol).value  = state.roomName;
+      newRow.commit();
+    });
+
+    // Generate and download
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Аудит_${state.roomName}_${new Date().toLocaleDateString('ru')}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    clearSession();
+  } catch (err) {
+    alert('Ошибка при создании файла: ' + err.message);
+    console.error(err);
   }
-
-  // Write with cellStyles support
-  const newWb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
-  XLSX.writeFile(newWb, `Аудит_${state.roomName}_${new Date().toLocaleDateString('ru')}.xlsx`, { cellStyles: true });
-
-  clearSession();
 }
 
 // ============================================================
