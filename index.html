@@ -1040,7 +1040,7 @@ function renderCard(result) {
   const list = document.getElementById('results-list');
   const card = document.createElement('div');
   card.id = 'card-' + result.id;
-  card.className = 'result-card ' + (result.status === 'found' ? 'card-found' : result.status === 'notfound' ? 'card-notfound' : 'card-error');
+  card.className = 'result-card ' + (result.status === 'found' ? 'card-found' : (result.status === 'notfound' || result.status === 'notfound_confirmed') ? 'card-notfound' : 'card-error');
 
   const rowData = result.rowIndex >= 0 ? state.excelData[result.rowIndex] : null;
   const nameColIdx = state.excelHeaders.findIndex(h => ['название', 'name', 'наименование'].some(k => String(h).toLowerCase().includes(k)));
@@ -1048,6 +1048,7 @@ function renderCard(result) {
 
   let badgeClass, badgeText;
   if (result.status === 'found') { badgeClass = 'badge-found'; badgeText = 'Найдено'; }
+  else if (result.status === 'notfound_confirmed') { badgeClass = 'badge-notfound'; badgeText = 'Не в таблице ✓'; }
   else if (result.status === 'notfound') { badgeClass = 'badge-notfound'; badgeText = 'Не в базе'; }
   else { badgeClass = 'badge-error'; badgeText = 'Не распознано'; }
 
@@ -1073,11 +1074,15 @@ function renderCard(result) {
   }
 
   if (result.status === 'notfound' && result.serials.length > 0) {
-    html += `<div class="candidates-list"><div class="candidates-label">Распознанные номера</div>`;
+    html += `<div class="candidates-list"><div class="candidates-label">Распознанные номера — выберите нужный:</div>`;
     result.serials.forEach(s => {
       html += `<div class="candidate-item"><span class="candidate-serial">${s}</span><span class="candidate-use" onclick="confirmNotInTable('${result.id}', '${s}')">Занести в "Нет в таблице" →</span></div>`;
     });
     html += `</div>`;
+  }
+
+  if (result.status === 'notfound_confirmed') {
+    html += `<div class="candidates-list"><div class="candidates-label" style="color:var(--yellow)">✓ Записан в "Нет в таблице": <strong style="color:var(--text)">${result['_notInTable']}</strong></div></div>`;
   }
 
   if (result.status === 'notfound' || result.status === 'error') {
@@ -1112,8 +1117,9 @@ function confirmNotInTable(resultId, serial) {
   if (!result) return;
   result.matchedSerial = serial;
   result['_notInTable'] = serial;
+  result.status = 'notfound_confirmed';
   saveSession();
-  alert(`"${serial}" помечен как "Нет в таблице"`);
+  renderCard(result);
 }
 
 function manualSearch(resultId) {
@@ -1166,7 +1172,7 @@ function updateQueueBar() {
 // ============================================================
 function updateStats() {
   const found = state.results.filter(r => r.status === 'found').length;
-  const notfound = state.results.filter(r => r.status === 'notfound').length;
+  const notfound = state.results.filter(r => r.status === 'notfound' || r.status === 'notfound_confirmed').length;
   const total = state.excelData.length;
   const unchecked = total - found;
 
@@ -1179,7 +1185,7 @@ function updateStats() {
 // ============================================================
 function showFinish() {
   const found = state.results.filter(r => r.status === 'found').length;
-  const notfound = state.results.filter(r => r.status === 'notfound').length;
+  const notfound = state.results.filter(r => r.status === 'notfound' || r.status === 'notfound_confirmed').length;
   const total = state.excelData.length;
   const unchecked = total - found;
 
@@ -1211,39 +1217,77 @@ function downloadExcel() {
     return;
   }
 
-  const ws = excelWorkbook.Sheets[excelWorkbook.SheetNames[0]];
+  const sheetName = excelWorkbook.SheetNames[0];
+  const ws = excelWorkbook.Sheets[sheetName];
   const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
 
-  // Find column indices
   const headers = data[0];
-  const auditIdx = headers.findIndex(h => String(h).toLowerCase().includes('аудит'));
-  const roomIdx = headers.findIndex(h => String(h).toLowerCase().includes('кабинет'));
-  const usageIdx = headers.findIndex(h => String(h).toLowerCase().includes('статус использ'));
-  const notInTableIdx = headers.findIndex(h => String(h).toLowerCase().includes('нет в таблице'));
 
-  // Update each data row
+  // Detect columns by header name (exact match priority, then partial)
+  function findCol(keywords) {
+    for (const kw of keywords) {
+      const idx = headers.findIndex(h => String(h).toLowerCase() === kw.toLowerCase());
+      if (idx >= 0) return idx;
+    }
+    for (const kw of keywords) {
+      const idx = headers.findIndex(h => String(h).toLowerCase().includes(kw.toLowerCase()));
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+
+  const auditIdx    = findCol(['Аудит', 'аудит']);
+  const nameIdx     = findCol(['Название', 'название', 'name']);
+  const usageIdx    = findCol(['Статус использования', 'статус использ', 'использован']);
+  const roomIdx     = findCol(['Расположение', 'кабинет', 'расположение']);
+  const notInTblIdx = findCol(['Нет в таблице', 'нет в таблице']);
+
+  // Update existing rows
   state.excelData.forEach((rowObj, i) => {
-    const excelRowIdx = i + 2; // 1-indexed + header row
-    const row = data[excelRowIdx - 1]; // 0-indexed in data array (skip header)
+    const row = data[i + 1]; // i+1 because row 0 is header
     if (!row) return;
-
     if (auditIdx >= 0) row[auditIdx] = rowObj['_auditStatus'] || 'Не проверялось';
     if (roomIdx >= 0 && rowObj['_room']) row[roomIdx] = rowObj['_room'];
     if (usageIdx >= 0 && rowObj['_usage']) row[usageIdx] = rowObj['_usage'];
   });
 
-  // Add "not in table" items
-  const notFoundResults = state.results.filter(r => r.status === 'notfound' && r['_notInTable']);
-  if (notInTableIdx >= 0 && notFoundResults.length > 0) {
-    const notFoundSerials = notFoundResults.map(r => r['_notInTable']).join(', ');
-    // Put in a note row or last column
-    data[1][notInTableIdx] = notFoundSerials;
+  // Append "not in table" serials as new rows at the bottom of Название column
+  const confirmedNotInTable = state.results.filter(r => r.status === 'notfound_confirmed' && r['_notInTable']);
+  if (confirmedNotInTable.length > 0 && nameIdx >= 0) {
+    confirmedNotInTable.forEach(r => {
+      const newRow = new Array(headers.length).fill('');
+      newRow[nameIdx] = r['_notInTable'];
+      if (notInTblIdx >= 0) newRow[notInTblIdx] = r['_notInTable'];
+      data.push(newRow);
+    });
   }
 
+  // Build new worksheet
   const newWs = XLSX.utils.aoa_to_sheet(data);
+
+  // Apply cell colors for "Статус использования" column
+  if (usageIdx >= 0) {
+    for (let i = 1; i < data.length; i++) {
+      const val = String(data[i][usageIdx] || '').trim();
+      if (!val) continue;
+      const cellAddr = XLSX.utils.encode_cell({ r: i, c: usageIdx });
+      if (!newWs[cellAddr]) newWs[cellAddr] = { t: 's', v: val };
+      const isUsed = val.toLowerCase().includes('использу') && !val.toLowerCase().includes('не использу');
+      newWs[cellAddr].s = {
+        fill: {
+          patternType: 'solid',
+          fgColor: { rgb: isUsed ? '22c55e' : 'ef4444' },
+        },
+        font: { color: { rgb: 'FFFFFF' }, bold: true },
+        alignment: { horizontal: 'center', vertical: 'center' },
+      };
+    }
+  }
+
+  // Write with cellStyles support
   const newWb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(newWb, newWs, excelWorkbook.SheetNames[0]);
-  XLSX.writeFile(newWb, `Аудит_${state.roomName}_${new Date().toLocaleDateString('ru')}.xlsx`);
+  XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
+  XLSX.writeFile(newWb, `Аудит_${state.roomName}_${new Date().toLocaleDateString('ru')}.xlsx`, { cellStyles: true });
 
   clearSession();
 }
