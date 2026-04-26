@@ -227,6 +227,21 @@
   }
   .results-empty svg { width: 40px; height: 40px; fill: var(--text3); opacity: 0.4; }
 
+  .card-delete-btn {
+    background: none;
+    border: none;
+    color: var(--text3);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 6px;
+    line-height: 1;
+    transition: color 0.2s, background 0.2s;
+    flex-shrink: 0;
+    margin-left: 4px;
+  }
+  .card-delete-btn:hover { color: var(--red); background: var(--red-bg); }
+
   .result-card {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -511,9 +526,10 @@
     <div class="form-group">
       <label class="form-label">Модель</label>
       <select class="form-input" id="model-select">
-        <option value="google/gemini-2.5-flash-preview:thinking">Gemini 2.5 Flash (рекомендуется)</option>
+        <option value="google/gemini-3-flash-preview">Gemini 3 Flash Preview ✨ (новый)</option>
+        <option value="google/gemini-2.5-flash-preview-09-2025">Gemini 2.5 Flash (сент. 2025)</option>
         <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
-        <option value="google/gemini-2.5-pro-preview-05-06">Gemini 2.5 Pro</option>
+        <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
         <option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku</option>
       </select>
     </div>
@@ -624,7 +640,7 @@ let db = null;
 
 let state = {
   apiKey: '',
-  model: 'google/gemini-2.0-flash-001',
+  model: 'google/gemini-3-flash-preview',
   roomName: '',
   excelData: [],       // array of row objects from Excel
   excelHeaders: [],    // original headers
@@ -850,7 +866,9 @@ function cancelPhoto() {
 async function confirmSavePhoto() {
   document.getElementById('confirm-overlay').classList.remove('active');
 
-  if (state.queue.length >= state.MAX_QUEUE) {
+  // Only count active (not yet processed) items in queue
+  const activeCount = state.queue.filter(q => q.status === 'waiting' || q.status === 'processing').length;
+  if (activeCount >= state.MAX_QUEUE) {
     alert(`Очередь заполнена (${state.MAX_QUEUE} фото). Дождитесь обработки.`);
     return;
   }
@@ -897,7 +915,7 @@ async function recognizePhoto(item) {
     const base64 = item.dataUrl.split(',')[1];
     const mimeType = item.dataUrl.split(';')[0].split(':')[1];
 
-    const prompt = `Ты система распознавания серийных номеров оборудования.
+    const prompt = `Ты система точного распознавания серийных номеров оборудования.
 
 На фото — наклейка или корпус оборудования. Найди ВСЕ возможные серийные номера.
 
@@ -906,7 +924,12 @@ async function recognizePhoto(item) {
 2. Если меток нет — ищи строки из букв и цифр длиной от 5 до 25 символов (могут содержать тире)
 3. Если есть QR-код наклейка Honeywell — 4-я строка сверху это серийный номер
 4. Игнорируй: MAC адреса (XX:XX:XX формат), IP адреса, даты, чисто служебные коды
-5. Верни ВСЕ найденные кандидаты
+
+КРИТИЧЕСКИ ВАЖНО — точность символов:
+- Если символ выглядит как буква (S, B, O, Z, I) — пиши БУКВУ, не цифру
+- Если символ выглядит как цифра (5, 8, 0, 2, 1) — пиши ЦИФРУ, не букву
+- НЕ заменяй: S→5, B→8, O→0, Z→2, I→1 и наоборот
+- Воспроизводи ТОЧНО то что написано на наклейке
 
 Отвечай ТОЛЬКО в формате JSON (без markdown, без пояснений):
 {"serials": ["SERIAL1", "SERIAL2"]}
@@ -1061,6 +1084,7 @@ function renderCard(result) {
         ${result.status === 'error' && result.errorMsg ? `<div style="font-size:11px;color:var(--red);margin-top:4px;word-break:break-all;">${result.errorMsg}</div>` : ''}
       </div>
       <span class="card-badge ${badgeClass}">${badgeText}</span>
+      <button class="card-delete-btn" onclick="deleteResult('${result.id}')" title="Удалить">✕</button>
     </div>
   `;
 
@@ -1099,6 +1123,27 @@ function renderCard(result) {
   const firstChild = list.querySelector('.result-card');
   if (firstChild) list.insertBefore(card, firstChild);
   else list.appendChild(card);
+}
+
+function deleteResult(resultId) {
+  const result = state.results.find(r => r.id === resultId);
+  if (!result) return;
+  const label = result.matchedSerial || (result.serials && result.serials[0]) || 'эту запись';
+  if (!confirm(`Удалить "${label}" из списка и сбросить в таблице?`)) return;
+  if (result.rowIndex >= 0 && state.excelData[result.rowIndex]) {
+    state.excelData[result.rowIndex]['_auditStatus'] = 'Не проверялось';
+    state.excelData[result.rowIndex]['_room'] = '';
+    state.excelData[result.rowIndex]['_usage'] = '';
+  }
+  state.results = state.results.filter(r => r.id !== resultId);
+  const card = document.getElementById('card-' + resultId);
+  if (card) card.remove();
+  if (state.results.length === 0) {
+    const empty = document.getElementById('results-empty');
+    if (empty) empty.style.display = '';
+  }
+  saveSession();
+  updateStats();
 }
 
 function setUsage(resultId, value) {
@@ -1154,11 +1199,12 @@ function manualSearch(resultId) {
 // ============================================================
 function updateQueueBar() {
   const bar = document.getElementById('queue-bar');
-  if (state.queue.length === 0) {
+  const active = state.queue.filter(q => q.status === 'waiting' || q.status === 'processing');
+  if (active.length === 0) {
     bar.innerHTML = '<span class="queue-empty">Очередь пуста — нажмите камеру</span>';
     return;
   }
-  bar.innerHTML = state.queue.map(q => `
+  bar.innerHTML = active.map(q => `
     <div class="queue-thumb q-${q.status}">
       <img src="${q.dataUrl}" alt="">
       ${q.status === 'processing' ? '<div class="q-spinner"></div>' : ''}
